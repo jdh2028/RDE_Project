@@ -81,8 +81,8 @@ def T_aw(Pr_gas, Mach_gas, T_0, gamma):
 
 # T_wg : 가스 쪽 벽면 온도
 
-def T_wgf(q_conv, h_g, T_aw):
-  T_wg = T_aw - (q_conv / h_g)
+def T_wgf(q_conv, T_wc, Wall_Thick, K_w):
+  T_wg = T_wc + (Wall_Thick * q_conv /  K_w)
   return T_wg
 
 def T_wg_out(T_wc, wall_thick, q_conv, k_w):
@@ -186,15 +186,18 @@ alpha = 0.2         #수렴 계수
 
 
 T_c_init = 291.7     # 냉각제 입구 온도 [K]
-T_wg_init = 1500     # 가스측 벽 온도 초기값
+T_wg_init = 500     # 가스측 벽 온도 초기값
+
+T_c = T_c_init
+T_wg = T_wg_init
+
 
 T_aw_val = T_aw(Pr_gas, Mach_gas, T_0, Gamma)
 
 Re_c, Pr_c = Coolant_cal(k_c, Cp_c, Mu_c, Rho_c, U_c, D_c)
 h_c = h_cf(k_c, D_c, Re_c, Pr_c)
 
-T_c = T_c_init
-T_wg = T_wg_init
+
 
 
 # 수렴 기반 반복 계산
@@ -207,56 +210,49 @@ T_c_arr = []
 
 C_star_val  = C_star(P_0 , A_t , M_dot)
 
-x = np.linspace(0, 1, 10)
+x = np.linspace(0, 0.3, 100)
 A_x = A_t * np.ones_like(x)
 
-print(A_x)
+
 
 # dx 계산 (x는 축방향 위치 배열)
 dx = x[1] - x[0]
 
 area =  D_c * dx
 
-for i, A in enumerate(x):
+T_aw_val = T_aw(Pr_gas, Mach_gas, T_0, Gamma)
+
+for i, oi in enumerate(x):
     
-    h_g = bartz_h_g(Mach_gas, T_wg, D_t, P_0, T_0, Gamma, Mu, Cp_gas, Pr_gas, w, C_star_val)
+   
     for _ in range(max_iter):
         
-        T_wg_copy = T_wg
-
-
-                      
+        h_g = bartz_h_g(Mach_gas, T_wg, D_t, P_0, T_0, Gamma, Mu, Cp_gas, Pr_gas, w, C_star_val)              
         q = qconv_h(T_aw_val, T_wg, h_g)
         
-        if q < 0: break
-
-        T_wc =T_wc_in(T_wg, Wall_Thick, q, k_w)
-        
-        q_new = (T_wc-T_c)*h_c 
-        
-        T_wg_new = T_wg_out(T_wc, Wall_Thick, q_new, k_w)
+        T_c1 = q/(M_dot_c*Cp_c) + T_c
+        T_wc = T_c1 + q / h_c
+        T_wg_new = T_wgf(q, T_wc, Wall_Thick, k_w)
         
         
-        if abs(q - q_new) < 100 and abs(T_wg_new - T_wg) < tol:
+        if abs(T_wg_new - T_wg) < tol:
+            
             break
-
         
         T_wg = (1-alpha)*T_wg + alpha*T_wg_new
         
-        delta_Tc = (q * area) / (M_dot_c * Cp_c)
+    
 
-        T_c      = (1-alpha)*T_c + alpha*(T_c + delta_Tc)
 
-    # 냉각제 온도 누적 상승 (에너지 보존식 기반)
-      # 내부 열교환 면적
-   
+    
+    
     
 
     # 저장
-    T_wg_arr.append(T_wg)
+    T_wg_arr.append(T_wg_new)
     T_wc_arr.append(T_wc)
     q_arr.append(q)
-    T_c_arr.append(T_c)
+    T_c_arr.append(T_c1)
 
 
 
@@ -264,9 +260,9 @@ for i, A in enumerate(x):
 # 온도 플롯
 fig, ax1 = plt.subplots(figsize=(10, 6))
 
-ax1.plot(x, T_wg_arr, label='T_wg (Gas-side Wall Temp)', linewidth=2, color='red')
-ax1.plot(x, T_wc_arr, label='T_wc (Coolant-side Wall Temp)', linewidth=2, color='blue')
-ax1.plot(x, T_c_arr, label='T_c (Coolant Temp)', linestyle='--', linewidth=2, color='green')
+ax1.plot(x, T_wg_arr[:], label='T_wg (Gas-side Wall Temp)', linewidth=2, color='red')
+ax1.plot(x, T_wc_arr[:], label='T_wc (Coolant-side Wall Temp)', linewidth=2, color='blue')
+ax1.plot(x, T_c_arr[:], label='T_c (Coolant Temp)', linestyle='--', linewidth=2, color='green')
 
 ax1.set_xlabel('Nozzle Axial Position x [m]', fontsize=12)
 ax1.set_ylabel('Temperature [K]', fontsize=12)
@@ -277,9 +273,5 @@ plt.tight_layout()
 plt.show()
 
 
-# In[ ]:
 
-
-for value in x:
-    print(value)  # 둘 다 500이어야 해!
 
