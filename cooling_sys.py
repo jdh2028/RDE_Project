@@ -205,7 +205,7 @@ T_wg_arr = []
 T_wc_arr = []
 q_arr = []
 T_c_arr = []
-
+T_aw_arr = []
 
 
 C_star_val  = C_star(P_0 , A_t , M_dot)
@@ -224,6 +224,12 @@ T_aw_val = T_aw(Pr_gas, Mach_gas, T_0, Gamma)
 
 for i, oi in enumerate(x):
     
+
+    h_g = 0.0
+    q = 0.0
+    T_c1 = 0.0
+    T_wc = 0.0
+
    
     for _ in range(max_iter):
         
@@ -241,34 +247,46 @@ for i, oi in enumerate(x):
         
         T_wg = (1-alpha)*T_wg + alpha*T_wg_new
         
-    
-
-
-    
-    
-    
+    T_c = T_c1
+   
 
     # 저장
     T_wg_arr.append(T_wg_new)
     T_wc_arr.append(T_wc)
     q_arr.append(q)
     T_c_arr.append(T_c1)
-
+    T_aw_arr.append(T_aw_val)
 
 
 
 # 온도 플롯
 fig, ax1 = plt.subplots(figsize=(10, 6))
 
-ax1.plot(x, T_wg_arr[:], label='T_wg (Gas-side Wall Temp)', linewidth=2, color='red')
-ax1.plot(x, T_wc_arr[:], label='T_wc (Coolant-side Wall Temp)', linewidth=2, color='blue')
-ax1.plot(x, T_c_arr[:], label='T_c (Coolant Temp)', linestyle='--', linewidth=2, color='green')
+ax1.plot(x, T_wg_arr, label='T_wg (Gas-side Wall Temp)', linewidth=2, color='black')
+ax1.plot(x, T_c_arr, label='T_c (Coolant Temp)', linewidth=2, color='blue')
+ax1.plot(x, T_aw_arr, label='T_aw (Gas Temp)', linewidth=4, color='red')
 
 ax1.set_xlabel('Nozzle Axial Position x [m]', fontsize=12)
 ax1.set_ylabel('Temperature [K]', fontsize=12)
-ax1.legend(loc='upper left')
+ax1.set_ylim(bottom=0)
 ax1.grid(True)
-plt.title('Temperature Distribution Along Nozzle', fontsize=14)
+
+# 노즐 형상 (하단 표시)
+ax1.fill_between(x, 0, A_x / np.max(A_x) * np.min(T_c_arr) * 0.3,
+                 color='gray', alpha=0.3, label='Nozzle Shape (scaled)')
+
+# 오른쪽 y축: 열유속
+ax2 = ax1.twinx()
+ax2.plot(x, q_arr, label='Heat Flux q', color='orange', linewidth=1.5)
+ax2.set_ylabel('Heat Flux [W/m²]', fontsize=12, color='orange')
+ax2.tick_params(axis='y', labelcolor='orange')
+
+
+ax1.legend(loc='upper right', bbox_to_anchor=(1, 0.65))
+ax2.legend(loc='upper right', bbox_to_anchor=(1, 0.85))  
+
+
+plt.title('Temperature and Heat Flux Distribution Along 1-D Nozzle', fontsize=14)
 plt.tight_layout()
 plt.show()
 
