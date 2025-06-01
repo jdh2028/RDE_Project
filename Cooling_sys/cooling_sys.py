@@ -8,6 +8,7 @@ from matplotlib import pyplot as plt
 
 import numpy as np
 
+import CoolProp.CoolProp as CP
 
 # In[2]:
 
@@ -140,49 +141,43 @@ w = 0.6          #물성지수성지수
 #구조 성분
 
 Wall_Thick = 0.5*1e-3 #[m]
+
+
 k_w = 120             #벽 열전도율
 
 #area = 1.398e-3     #[m^2]
-D_t = 0.3 # 목 직경
+D_t = 0.0198 # 목 직경
 A_t = (np.pi * D_t**2)/4    # 목 면적
 R = 0             #곡률반지름
 
 
 
 D_c = 2e-3          # 냉각유로 직경[m]
+A_c = (np.pi * D_c**2)/4
 
 
 #냉각제 성분
 
-#T_c = 291.7           # 냉각제 입구 온도 (초기)
-k_c = 0.6            # 냉각제 열전도율
-
-Cp_c = 4182         # 냉각제 정압비열  [J/kg·K]
-Mu_c = 9.57e-4          # 냉각제 점성계수
-Rho_c = 996.9         # 냉각제 밀도
-U_c = 31.93            # 냉각제 속도
-M_dot_c = U_c * Rho_c * (np.pi * D_c**2)/4     # 냉각제 질량유량 [kg/s]
 
 
-# In[ ]:
+COOLANT_NAME = 'Water'
+P_coolant = 20e5
+
+M_dot_c = 0.1     # 냉각제 질량유량 [kg/s]
 
 
-print(M_dot_c)
 
 
-# In[18]:
 
 
 #초기 설정값(실행관련 성분)
 
-         #[K] 초기 설정값
 
 tol = 1e-3          #열전달 계수 오차
 max_iter = 1000      #열 전달계수 반복 계산
 alpha = 0.2         #수렴 계수
 
 
-# In[ ]:
 
 
 T_c_init = 291.7     # 냉각제 입구 온도 [K]
@@ -190,12 +185,11 @@ T_wg_init = 500     # 가스측 벽 온도 초기값
 
 T_c = T_c_init
 T_wg = T_wg_init
+T_0_local = T_0
 
 
-T_aw_val = T_aw(Pr_gas, Mach_gas, T_0, Gamma)
 
-Re_c, Pr_c = Coolant_cal(k_c, Cp_c, Mu_c, Rho_c, U_c, D_c)
-h_c = h_cf(k_c, D_c, Re_c, Pr_c)
+
 
 
 
@@ -218,9 +212,9 @@ A_x = A_t * np.ones_like(x)
 # dx 계산 (x는 축방향 위치 배열)
 dx = x[1] - x[0]
 
-area =  D_c * dx
+Coolant_Area = D_c * np.pi /2 * dx # 냉각제가 만나는 열과 만나는 면적적
 
-T_aw_val = T_aw(Pr_gas, Mach_gas, T_0, Gamma)
+
 
 for i, oi in enumerate(x):
     
@@ -230,13 +224,26 @@ for i, oi in enumerate(x):
     T_c1 = 0.0
     T_wc = 0.0
 
-   
+    rho_c = CP.PropsSI('D', 'T', T_c, 'P', P_coolant, COOLANT_NAME)
+    mu_c  = CP.PropsSI('V', 'T', T_c, 'P', P_coolant, COOLANT_NAME)
+    Cp_c  = CP.PropsSI('Cpmass', 'T', T_c, 'P', P_coolant, COOLANT_NAME)
+    k_c   = CP.PropsSI('L', 'T', T_c, 'P', P_coolant, COOLANT_NAME)
+
+    U_c_local = M_dot_c / (rho_c * A_c)
+
+    
+    
+    Re_c_local, Pr_c_local = Coolant_cal(k_c, Cp_c, mu_c, rho_c, U_c_local, D_c)
+    h_c = h_cf(k_c, D_c, Re_c_local, Pr_c_local)
+
+    T_aw_val = T_aw(Pr_gas, Mach_gas, T_0_local, Gamma)
+
     for _ in range(max_iter):
         
-        h_g = bartz_h_g(Mach_gas, T_wg, D_t, P_0, T_0, Gamma, Mu, Cp_gas, Pr_gas, w, C_star_val)              
+        h_g = bartz_h_g(Mach_gas, T_wg, D_t, P_0, T_0_local, Gamma, Mu, Cp_gas, Pr_gas, w, C_star_val)              
         q = qconv_h(T_aw_val, T_wg, h_g)
-        
-        T_c1 = q/(M_dot_c*Cp_c) + T_c
+        Q = q * Coolant_Area
+        T_c1 = Q /(M_dot_c*Cp_c) + T_c
         T_wc = T_c1 + q / h_c
         T_wg_new = T_wgf(q, T_wc, Wall_Thick, k_w)
         
@@ -246,14 +253,21 @@ for i, oi in enumerate(x):
             break
         
         T_wg = (1-alpha)*T_wg + alpha*T_wg_new
-        
+    
+    h_g_final = bartz_h_g(Mach_gas, T_wg_new, D_t, P_0, T_0_local, Gamma, Mu, Cp_gas, Pr_gas, w, C_star_val)
+    q_final = qconv_h(T_aw_val, T_wg_new, h_g_final)
+    
+
     T_c = T_c1
    
+    delta_T_0_gas = - (q_final * np.pi * D_t * dx) / (M_dot * Cp_gas) 
+    T_0_gas_local_new = T_0_local + delta_T_0_gas
+    T_0_local = T_0_gas_local_new
 
     # 저장
     T_wg_arr.append(T_wg_new)
     T_wc_arr.append(T_wc)
-    q_arr.append(q)
+    q_arr.append(q_final)
     T_c_arr.append(T_c1)
     T_aw_arr.append(T_aw_val)
 
