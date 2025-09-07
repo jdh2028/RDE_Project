@@ -1,0 +1,367 @@
+import numpy as np
+import matplotlib.pyplot as plt
+import CoolProp.CoolProp as CP
+from scipy.interpolate import UnivariateSpline
+from scipy.signal import savgol_filter
+
+# ==============================================================================
+# 0. 노즐 형상 정의 클래스 (사용자 데이터 기반)
+# ==============================================================================
+class NozzleContour:
+    """
+    사용자가 제공한 (x, y) 좌표 데이터로부터 노즐 형상을 정의하고,
+    특정 축 위치(x)에서의 반경, 직경, 면적 등을 계산합니다.
+    """
+    def __init__(self, contour_data_cm):
+        # 데이터를 m 단위로 변환하고 x좌표 기준으로 정렬
+        data_m = np.array(contour_data_cm) / 100.0
+        x, y = data_m[:, 0], data_m[:, 1]
+        sort_idx = np.argsort(x)
+        self.x_data, self.y_data = x[sort_idx], y[sort_idx]
+
+        # 목(throat)의 위치와 반경 찾기
+        self.throat_idx = np.argmin(self.y_data)
+        self.x_throat = self.x_data[self.throat_idx]
+        self.R_t = self.y_data[self.throat_idx]
+        self.D_t = 2 * self.R_t
+        self.A_t = np.pi * self.R_t**2
+
+        # x좌표를 목(throat) 기준으로 재정의 (목이 x=0이 되도록 이동)
+        self.x_data_shifted = self.x_data - self.x_throat
+
+        # 스플라인 보간을 사용하여 부드러운 형상 곡선 생성
+        # s=0은 모든 점을 지나는 보간을 의미
+        self.spline = UnivariateSpline(self.x_data_shifted, self.y_data, s=0, k=3)
+
+    def get_radius(self, x):
+        """주어진 축 방향 위치(x)에서 노즐 반경(R)을 반환합니다."""
+        return self.spline(x)
+
+    def get_profile(self, x):
+        """주어진 축 방향 위치(x)에서 노즐 직경(D)과 면적비(A/A_t)를 계산합니다."""
+        R = self.get_radius(x)
+        A = np.pi * R**2
+        D = 2 * R
+        area_ratio = A / self.A_t
+        return D, area_ratio
+
+# ==============================================================================
+# 1. 열 해석 및 유동 관련 함수 정의 (개선됨)
+# ==============================================================================
+def get_gas_properties(T_static):
+    """
+    연소 가스의 정적 온도(T_static)에 따라 주요 물성치(gamma, mu, Cp)를 반환합니다.
+    고온/저온 데이터를 기반으로 한 선형 보간 모델. (정확도 향상)
+    """
+    # CH4/LOX 연소 가스 물성치 근사 데이터 (T0=3600K, T_exit_approx=2000K)
+    T_high, T_low = 3600.0, 2000.0
+    gamma_high, gamma_low = 1.15, 1.22
+    mu_high, mu_low = 8.0e-5, 6.0e-5
+    Cp_high, Cp_low = 3500.0, 2800.0
+
+    # 선형 보간
+    gamma = np.interp(T_static, [T_low, T_high], [gamma_low, gamma_high])
+    mu = np.interp(T_static, [T_low, T_high], [mu_low, mu_high])
+    Cp = np.interp(T_static, [T_low, T_high], [Cp_low, Cp_high])
+    
+    return gamma, mu, Cp
+
+def mach_from_area_ratio(area_ratio, gamma, flow_type='subsonic'):
+    """면적-마하수 관계식(Isentropic Flow)을 이용해 마하수를 계산합니다."""
+    M = 0.5 if flow_type == 'subsonic' else 2.0
+    for _ in range(10):
+        f = (1 / M**2) * ((2 / (gamma + 1)) * (1 + (gamma - 1) / 2 * M**2))**((gamma + 1) / (gamma - 1)) - area_ratio**2
+        if abs(f) < 1e-6: break
+        dfdm_term1 = -2 / M**3
+        dfdm_term2 = ((gamma + 1) / (gamma - 1)) * (1 / (1 + (gamma - 1) / 2 * M**2)) * ((gamma - 1) / 2) * (2 * M)
+        dfdm_combined = dfdm_term1 * ((2 / (gamma + 1)) * (1 + (gamma - 1) / 2 * M**2))**((gamma + 1) / (gamma - 1)) + \
+                        (1 / M**2) * ((2 / (gamma + 1)) * (1 + (gamma - 1) / 2 * M**2))**((gamma + 1) / (gamma - 1)) * dfdm_term2
+        M -= f / dfdm_combined
+    return M
+
+def bartz_h_g(Mach, T_wg, D_t, area_ratio, P_c, T_0, gamma, mu, Cp, Pr, C_star):
+    """Bartz 방정식을 사용하여 연소가스 측 대류 열전달 계수를 계산합니다."""
+    r = Pr**(1/3)
+    T_aw = T_0 * (1 + r * (gamma - 1) / 2 * Mach**2) / (1 + (gamma - 1) / 2 * Mach**2)
+    
+    w = 0.6
+    term1 = 0.5 * (T_wg / T_0) * (1 + (gamma - 1) / 2 * Mach**2)
+    term2 = 0.5
+    denominator = (term1 + term2)**(0.8 - w / 5) * (1 + (gamma - 1) / 2 * Mach**2)**(w / 5)
+    sigma_corr = 1 / denominator if denominator != 0 else 1.0
+    
+    h_g = (0.026 / (D_t**0.2)) * ((mu**0.2 * Cp) / (Pr**0.6)) * ((P_c / C_star)**0.8) * (1 / area_ratio)**0.9 * sigma_corr
+    return h_g, T_aw
+
+def calculate_pressure_drop(m_dot_c, T_c, P_c, A_c, d_h, dx, fluid):
+    """Darcy-Weisbach 방정식을 이용해 냉각 채널의 압력 강하를 계산합니다."""
+    try:
+        rho_c = CP.PropsSI('D', 'T', T_c, 'P', P_c, fluid)
+        mu_c = CP.PropsSI('V', 'T', T_c, 'P', P_c, fluid)
+        
+        Re_c = (m_dot_c / A_c) * d_h / mu_c
+        if Re_c < 4000: return 0.0 # 층류는 무시
+
+        # Blasius 상관식을 이용한 마찰 계수 f 계산 (for smooth pipes)
+        f_friction = 0.316 * Re_c**-0.25
+        
+        velocity_c = m_dot_c / (A_c * rho_c)
+        dP = f_friction * (dx / d_h) * (rho_c * velocity_c**2 / 2.0)
+        return dP
+    except ValueError:
+        return 0.0
+
+def calculate_h_c(m_dot_c, A_c, d_h, T_c, T_wc, P_c, fluid='Methane'):
+    """냉각수 측 열전달 계수를 계산합니다 (Dittus-Boelter 식)."""
+    try:
+        if not (91 < T_c < 600 and 1e5 < P_c < 200e5): return 30000.0
+        
+        cp_c = CP.PropsSI('C', 'T', T_c, 'P', P_c, fluid)
+        mu_c = CP.PropsSI('V', 'T', T_c, 'P', P_c, fluid)
+        k_c = CP.PropsSI('L', 'T', T_c, 'P', P_c, fluid)
+        Pr_c = cp_c * mu_c / k_c
+        
+        Re_c = (m_dot_c / A_c) * d_h / mu_c
+        if Re_c < 4000: return 1000.0
+        
+        Nu_c = 0.023 * (Re_c**0.8) * (Pr_c**0.4)
+        h_c = Nu_c * k_c / d_h
+        return h_c
+    except ValueError:
+        return 30000.0
+
+# 기존 함수들 (q_conv_h, calculate_q_rad)은 변경 없음
+def q_conv_h(T_aw, T_wg, h_g):
+    return h_g * (T_aw - T_wg)
+
+def calculate_q_rad(T_gas, epsilon_eff=0.3):
+    sigma_sb = 5.67e-8
+    return sigma_sb * epsilon_eff * (T_gas**4)
+
+# ==============================================================================
+# 2. 입력 변수 및 계산 준비
+# ==============================================================================
+# --- 사용자 제공 노즐 형상 데이터 (단위: cm) ---
+nozzle_contour_data = np.array([
+    [-34.8, 10.72], [-33.6, 10.76], [-31.8, 10.65], [-30.2, 10.65], [-28.3, 10.65], 
+    [-26.5, 10.65], [-24.5, 10.64], [-21.6, 10.64], [-20.0, 10.53], [-17.8, 10.32],
+    [-15.3, 9.81], [-13.4, 9.40], [-11.3, 8.78], [-9.0, 7.96], [-7.4, 7.45],
+    [-4.7, 6.53], [-2.6, 5.91], [-1.1, 5.71], [0.05, 5.81], [1.0, 6.42], [2.0, 7.33],
+    [2.9, 8.05], [4.1, 8.96], [5.5, 9.88], [6.9, 11.0], [8.5, 12.12], [10.2, 13.24],
+    [11.8, 14.15], [13.1, 14.96], [14.5, 15.88], [16.1, 16.80], [18.1, 17.91],
+    [20.1, 19.03], [21.5, 19.74], [22.9, 20.56], [23.8, 20.96], [24.8, 21.57]
+])
+
+# --- 연소 가스 및 엔진 조건 (논문 Table 1) ---
+T_0 = 3603.2
+P_0 = 58.6e5
+Pr_gas = 0.65
+C_star = 1810
+
+# --- 냉각 채널 제원 및 조건 (논문 Table 2) ---
+wall_thickness = 0.7e-3
+channel_height = 8.63e-3
+channel_width = 1.08e-3
+num_channels = 150
+k_wall = 300.0
+COOLANT_NAME = 'Methane'
+m_dot_coolant = 10.0
+T_c_inlet = 120.0
+P_c_inlet = 127e5
+cooling_jacket_end_ar = 15
+
+# --- 파생 변수 계산 ---
+nozzle = NozzleContour(nozzle_contour_data)
+D_t = nozzle.D_t
+A_c_total = channel_width * channel_height * num_channels
+d_h = 2 * (channel_width * channel_height) / (channel_width + channel_height)
+
+# ==============================================================================
+# 3. 계산 설정 및 프로파일 생성
+# ==============================================================================
+n_segments = 200
+tol = 1e-3
+max_iter = 100
+alpha_relax = 0.2
+
+# --- 해석 구간 설정 (수축부 끝 ~ 팽창부 AR 15) ---
+x_start = nozzle.x_data_shifted[0]
+x_end_search = np.linspace(0, 0.5, 500)
+x_end = 0.25 # 기본값
+for x_val in x_end_search:
+    _, ar = nozzle.get_profile(x_val)
+    if ar >= cooling_jacket_end_ar:
+        x_end = x_val
+        break
+
+x_pos = np.linspace(x_start, x_end, n_segments)
+dx = x_pos[1] - x_pos[0]
+
+# --- 프로파일 배열 초기화 ---
+D_profile = np.zeros(n_segments)
+AR_profile = np.zeros(n_segments)
+T_c_profile = np.zeros(n_segments)
+P_c_profile = np.zeros(n_segments)
+T_wg_profile = np.zeros(n_segments)
+T_wc_profile = np.zeros(n_segments)
+q_profile = np.zeros(n_segments)
+h_g_profile = np.zeros(n_segments)
+
+# 냉각수 입구 조건 설정 (해석 시작점: 노즐 출구)
+T_c_profile[-1] = T_c_inlet
+P_c_profile[-1] = P_c_inlet
+T_wg_guess_for_next_step = 600.0
+
+# ==============================================================================
+# 4. 메인 계산 루프 (노즐 출구 -> 연소실)
+# ==============================================================================
+print("Starting Improved 1D thermal analysis...")
+
+for i in range(n_segments - 1, -1, -1):
+    x_local = x_pos[i]
+    D_local, AR_local = nozzle.get_profile(x_local)
+    D_profile[i], AR_profile[i] = D_local, AR_local
+    
+    T_c_local, P_c_local = T_c_profile[i], P_c_profile[i]
+    
+    # 1. 위치별 가스 물성치를 고려하여 마하수 계산
+    flow_type = 'subsonic' if x_local < 0 else 'supersonic'
+    # 먼저 평균 gamma로 Mach 추정 후, 정적 온도를 계산하여 정확한 물성치 적용
+    gamma_guess, _, _ = get_gas_properties(2800) # 평균 온도로 가정
+    Mach_local_guess = mach_from_area_ratio(AR_local, gamma_guess, flow_type)
+    T_static_local = T_0 / (1 + (gamma_guess - 1) / 2 * Mach_local_guess**2)
+    gamma_local, mu_gas_local, Cp_gas_local = get_gas_properties(T_static_local)
+    Mach_local = mach_from_area_ratio(AR_local, gamma_local, flow_type)
+
+    T_wg_iter = T_wg_guess_for_next_step
+    
+    for j in range(max_iter):
+        h_g, T_aw_local = bartz_h_g(Mach_local, T_wg_iter, D_t, AR_local, P_0, T_0, 
+                                    gamma_local, mu_gas_local, Cp_gas_local, Pr_gas, C_star)
+        
+        q_conv = q_conv_h(T_aw_local, T_wg_iter, h_g)
+        q_rad = calculate_q_rad(T_0)
+        q_total = q_conv + q_rad
+        if q_total < 0: q_total = 0
+
+        T_wc_sub_iter = T_c_local + 50.0
+        for k in range(20):
+            h_c = calculate_h_c(m_dot_coolant, A_c_total, d_h, T_c_local, T_wc_sub_iter, P_c_local, COOLANT_NAME)
+            if h_c == 0: h_c = 1e-9
+            T_wc_new_sub = T_c_local + q_total / h_c
+            if abs(T_wc_new_sub - T_wc_sub_iter) < 0.1: break
+            T_wc_sub_iter = T_wc_new_sub
+        T_wc_final = T_wc_sub_iter
+        
+        T_wg_new = T_wc_final + q_total * wall_thickness / k_wall
+        
+        if not np.isfinite(T_wg_new): break
+        if abs(T_wg_new - T_wg_iter) < tol: break
+        
+        T_wg_iter = T_wg_iter * (1 - alpha_relax) + T_wg_new * alpha_relax
+    
+    if j == max_iter - 1:
+        print(f"Warning: Convergence not reached at x = {x_local:.4f} m")
+
+    T_wg_profile[i] = T_wg_new
+    T_wc_profile[i] = T_wc_final
+    q_profile[i] = q_total
+    h_g_profile[i] = h_g
+    T_wg_guess_for_next_step = T_wg_new
+    
+
+    if i > 0:
+        # 2. 다음 스텝(i-1)의 냉각수 온도/압력 계산
+        A_heat_transfer = np.pi * D_local * dx
+        Q_segment = q_total * A_heat_transfer
+        try:
+            Cp_c = CP.PropsSI('C', 'T', T_c_local, 'P', P_c_local, COOLANT_NAME)
+            delta_T_c = Q_segment / (m_dot_coolant * Cp_c)
+            T_c_profile[i-1] = T_c_local + delta_T_c # 냉각수는 가열됨
+            
+            # 압력 강하 계산 및 반영 (개선된 부분)
+            dP = calculate_pressure_drop(m_dot_coolant, T_c_local, P_c_local, A_c_total, d_h, dx, COOLANT_NAME)
+            P_c_profile[i-1] = P_c_local - dP # 유동 방향으로 압력은 감소
+        except ValueError:
+            T_c_profile[i-1] = T_c_local
+            P_c_profile[i-1] = P_c_local
+
+# ==============================================================================
+# 5. 결과 시각화
+# ==============================================================================
+
+# Savitzky-Golay 필터 설정
+window_length = 100 # 데이터 포인트 31개를 사용하여 부드럽게 만듭니다.
+polyorder = 3     # 3차 다항식을 사용하여 피팅합니다.
+
+# 진동이 발생할 수 있는 주요 프로파일에 필터 적용
+q_profile_smooth = savgol_filter(q_profile, window_length, polyorder)
+T_wg_profile_smooth = savgol_filter(T_wg_profile, window_length, polyorder)
+T_wc_profile_smooth = savgol_filter(T_wc_profile, window_length, polyorder)
+
+
+
+
+fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(16, 12))
+fig.suptitle('1D Regenerative Cooling Analysis', fontsize=16)
+
+print(D_profile)
+
+
+# --- 열유량  ---
+ax1_twin = ax1.twinx()
+ax1.plot(x_pos, q_profile_smooth / 1e6, 'g-', label='Heat Flux')
+ax1_twin.plot(x_pos, D_profile *100/ 2, 'k', alpha=0.3, label='Nozzle Radius')
+ax1.set_xlabel('Axial Position from Throat (m)')
+ax1.set_ylabel('Heat Flux (MW/m^2)', color='g')
+ax1_twin.set_ylabel('Nozzle Radius (cm)')
+ax1.set_title('Heat Flux')
+ax1.grid(True)
+ax1.legend()
+ax1.set_ylim(0, 50) 
+ax1_twin.set_ylim(0, 60)
+
+# --- 가스 쪽 벽면  ---
+ax2_twin = ax2.twinx()
+ax2.plot(x_pos, T_wg_profile_smooth , 'r-', label='Gas-side Wall Temp.')
+ax2_twin.plot(x_pos, D_profile*100 / 2, 'k', alpha=0.3, label='Nozzle Radius')
+ax2.set_xlabel('Axial Position from Throat (cm)')
+ax2.set_ylabel('Temperature (K)')
+ax2.set_title('Gas-side wall temperature')
+ax2.grid(True)
+ax2.legend()
+ax2.set_ylim(0, 1500) 
+ax2_twin.set_ylim(0, 60)
+
+# --- 냉각제 온도 ---
+ax3_twin = ax3.twinx()
+ax3.plot(x_pos, T_c_profile, 'b:', label='Coolant Bulk Temp.')
+ax3_twin.plot(x_pos, D_profile*100 / 2, 'k', alpha=0.3, label='Nozzle Radius')
+ax3.set_xlabel('Axial Position from Throat (m)')
+ax3.set_ylabel('Coolant Temperature (K)', color='b')
+ax3_twin.set_ylabel('Nozzle Radius (m)')
+ax3.set_title('Coolant Temperature')
+ax3.grid(True)
+ax3.legend()
+ax3.set_ylim(0, 600) 
+ax3_twin.set_ylim(0, 60)
+
+# --- 냉각제 압력강하 ---
+ax4_twin = ax4.twinx()
+ax4.plot(x_pos, P_c_profile / 1e5, 'c-', label='Coolant Pressure')
+ax4_twin.plot(x_pos, D_profile*100 / 2, 'k', alpha=0.3, label='Nozzle Radius')
+ax4.set_xlabel('Axial Position from Throat (m)')
+ax4.set_ylabel('Coolant Pressure (bar)')
+ax4.set_title('Coolant Pressure Drop')
+ax4.grid(True)
+ax4.legend()
+ax4.set_ylim(118, 132) 
+ax4_twin.set_ylim(0, 60)
+
+
+for ax in [ax1, ax2, ax3, ax4]:
+    ax.axvline(x=0, color='grey', linewidth=1)
+    ax.set_xlim(x_pos.min(), x_pos.max())
+
+plt.tight_layout(rect=[0, 0, 1, 0.96])
+plt.show()
