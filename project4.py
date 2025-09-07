@@ -5,7 +5,7 @@ from scipy.interpolate import UnivariateSpline
 from scipy.signal import savgol_filter
 
 # ==============================================================================
-# 0. 노즐 형상 정의 클래스 (사용자 데이터 기반)
+# 0. 노즐 형상 정의 클래스 
 # ==============================================================================
 class NozzleContour:
     """
@@ -46,13 +46,10 @@ class NozzleContour:
         return D, area_ratio
 
 # ==============================================================================
-# 1. 열 해석 및 유동 관련 함수 정의 (개선됨)
+# 1. 열 해석 및 유동 관련 함수 정의 
 # ==============================================================================
 def get_gas_properties(T_static):
-    """
-    연소 가스의 정적 온도(T_static)에 따라 주요 물성치(gamma, mu, Cp)를 반환합니다.
-    고온/저온 데이터를 기반으로 한 선형 보간 모델. (정확도 향상)
-    """
+  
     # CH4/LOX 연소 가스 물성치 근사 데이터 (T0=3600K, T_exit_approx=2000K)
     T_high, T_low = 3600.0, 2000.0
     gamma_high, gamma_low = 1.15, 1.22
@@ -67,7 +64,7 @@ def get_gas_properties(T_static):
     return gamma, mu, Cp
 
 def mach_from_area_ratio(area_ratio, gamma, flow_type='subsonic'):
-    """면적-마하수 관계식(Isentropic Flow)을 이용해 마하수를 계산합니다."""
+    """면적-마하수 관계식(Isentropic Flow)을 이용해 마하수를 계산"""
     M = 0.5 if flow_type == 'subsonic' else 2.0
     for _ in range(10):
         f = (1 / M**2) * ((2 / (gamma + 1)) * (1 + (gamma - 1) / 2 * M**2))**((gamma + 1) / (gamma - 1)) - area_ratio**2
@@ -80,7 +77,7 @@ def mach_from_area_ratio(area_ratio, gamma, flow_type='subsonic'):
     return M
 
 def bartz_h_g(Mach, T_wg, D_t, area_ratio, P_c, T_0, gamma, mu, Cp, Pr, C_star):
-    """Bartz 방정식을 사용하여 연소가스 측 대류 열전달 계수를 계산합니다."""
+    """Bartz 방정식을 사용하여 연소가스 측 대류 열전달 계수를 계산"""
     r = Pr**(1/3)
     T_aw = T_0 * (1 + r * (gamma - 1) / 2 * Mach**2) / (1 + (gamma - 1) / 2 * Mach**2)
     
@@ -94,7 +91,7 @@ def bartz_h_g(Mach, T_wg, D_t, area_ratio, P_c, T_0, gamma, mu, Cp, Pr, C_star):
     return h_g, T_aw
 
 def calculate_pressure_drop(m_dot_c, T_c, P_c, A_c, d_h, dx, fluid):
-    """Darcy-Weisbach 방정식을 이용해 냉각 채널의 압력 강하를 계산합니다."""
+    """Darcy-Weisbach 방정식을 이용해 냉각 채널의 압력 강하를 계산"""
     try:
         rho_c = CP.PropsSI('D', 'T', T_c, 'P', P_c, fluid)
         mu_c = CP.PropsSI('V', 'T', T_c, 'P', P_c, fluid)
@@ -130,7 +127,7 @@ def calculate_h_c(m_dot_c, A_c, d_h, T_c, T_wc, P_c, fluid='Methane'):
     except ValueError:
         return 30000.0
 
-# 기존 함수들 (q_conv_h, calculate_q_rad)은 변경 없음
+
 def q_conv_h(T_aw, T_wg, h_g):
     return h_g * (T_aw - T_wg)
 
@@ -279,7 +276,7 @@ for i in range(n_segments - 1, -1, -1):
             delta_T_c = Q_segment / (m_dot_coolant * Cp_c)
             T_c_profile[i-1] = T_c_local + delta_T_c # 냉각수는 가열됨
             
-            # 압력 강하 계산 및 반영 (개선된 부분)
+            # 압력 강하 계산 및 반영 
             dP = calculate_pressure_drop(m_dot_coolant, T_c_local, P_c_local, A_c_total, d_h, dx, COOLANT_NAME)
             P_c_profile[i-1] = P_c_local - dP # 유동 방향으로 압력은 감소
         except ValueError:
@@ -365,3 +362,4 @@ for ax in [ax1, ax2, ax3, ax4]:
 
 plt.tight_layout(rect=[0, 0, 1, 0.96])
 plt.show()
+
